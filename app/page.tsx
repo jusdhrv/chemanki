@@ -8,17 +8,19 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Separator } from '@/components/ui/separator'
+import {
+  buildAnkiCards,
+  CARD_DETAILS,
+  CARD_DIRECTIONS,
+  downloadAnkiPackage,
+  exportToAnkiConnect,
+  type CardType,
+} from '@/lib/anki'
 import type { CompoundData, CompoundSearchHit } from '@/lib/pubchem'
 import { ChevronDown, FlaskConical, LoaderCircle, Moon, Search, Settings2, Sun, Upload, X } from 'lucide-react'
 
 const INITIAL_QUERY = 'methyl salicylate'
 const DEFAULT_HISTORY = ['methyl salicylate', 'aspirin', 'benzene']
-const directions = [
-  'Bond-line Diagram → Compound Name(s)',
-  'Compound Name(s) → Bond-line Diagram',
-  'Common Name → IUPAC Name & Properties',
-  'IUPAC Name → Common Name & Formula',
-]
 
 function formatFormula(formula: string) {
   return formula.replace(/\d+/g, (digits) => digits.split('').map((digit) => '₀₁₂₃₄₅₆₇₈₉'[Number(digit)] ?? digit).join(''))
@@ -110,9 +112,18 @@ export default function Page() {
   const [exportOpen, setExportOpen] = useState(false)
   const [query, setQuery] = useState(INITIAL_QUERY)
   const [expanded, setExpanded] = useState<'uses' | null>('uses')
-  const [toast, setToast] = useState('')
-  const [selectedDirections, setSelectedDirections] = useState([0, 2])
+  const [toast, setToast] = useState<{ message: string; tone: 'success' | 'error' } | null>(null)
+  const [selectedDirections, setSelectedDirections] = useState<CardType[]>(['image-to-name', 'name-to-properties'])
   const [selectedDetails, setSelectedDetails] = useState(['Formula', 'Molecular weight', 'Physical properties'])
+  const [customNotes, setCustomNotes] = useState('')
+  const [ankiEndpoint, setAnkiEndpoint] = useState('http://localhost:8765')
+  const [deckName, setDeckName] = useState('Organic Chemistry')
+  const [endpointDraft, setEndpointDraft] = useState('http://localhost:8765')
+  const [deckNameDraft, setDeckNameDraft] = useState('Organic Chemistry')
+  const [exporting, setExporting] = useState<'anki' | 'apkg' | null>(null)
+  const [exportProgress, setExportProgress] = useState('')
+  const [exportError, setExportError] = useState('')
+  const [ankiStatus, setAnkiStatus] = useState<'unknown' | 'connected' | 'unavailable'>('unknown')
   const [history, setHistory] = useState(DEFAULT_HISTORY)
   const [hits, setHits] = useState<CompoundSearchHit[]>([])
   const [compound, setCompound] = useState<CompoundData | null>(null)
@@ -143,6 +154,18 @@ export default function Page() {
     }
     return items
   }, [hits, history, query])
+
+  const exportCards = useMemo(
+    () =>
+      compound
+        ? buildAnkiCards(
+            compound,
+            { cardTypes: selectedDirections, details: selectedDetails, customNotes },
+            `chemanki-${compound.cid}.png`,
+          )
+        : [],
+    [compound, customNotes, selectedDetails, selectedDirections],
+  )
 
   useEffect(() => {
     function onPointerDown(event: MouseEvent) {
@@ -237,13 +260,69 @@ export default function Page() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  function showToast(message: string) {
-    setToast(message)
-    window.setTimeout(() => setToast(''), 3200)
+  function showToast(message: string, tone: 'success' | 'error' = 'success') {
+    setToast({ message, tone })
+    window.setTimeout(() => setToast(null), 4200)
+  }
+
+  function toggleCardType(type: CardType) {
+    setSelectedDirections((current) =>
+      current.includes(type) ? current.filter((item) => item !== type) : [...current, type],
+    )
   }
 
   function toggleItem(value: string, list: string[], setter: (next: string[]) => void) {
     setter(list.includes(value) ? list.filter((item) => item !== value) : [...list, value])
+  }
+
+  async function pushCardsToAnki() {
+    if (!compound) return
+    setExporting('anki')
+    setExportError('')
+    try {
+      const addedCount = await exportToAnkiConnect(
+        compound,
+        exportCards,
+        ankiEndpoint,
+        deckName,
+        setExportProgress,
+      )
+      setAnkiStatus('connected')
+      setExportOpen(false)
+      const skippedCount = exportCards.length - addedCount
+      if (addedCount === 0 && skippedCount > 0) {
+        showToast(`No new cards were added; all ${skippedCount} selected cards already exist in '${deckName}'.`)
+      } else {
+        const duplicateMessage = skippedCount > 0 ? ` ${skippedCount} duplicate card${skippedCount === 1 ? '' : 's'} skipped.` : ''
+        showToast(`${addedCount} card${addedCount === 1 ? '' : 's'} exported to Anki deck '${deckName}' successfully!${duplicateMessage}`)
+      }
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : 'AnkiConnect export failed. Check your settings and try again.'
+      setAnkiStatus('unavailable')
+      setExportError(message)
+      showToast(message, 'error')
+    } finally {
+      setExporting(null)
+      setExportProgress('')
+    }
+  }
+
+  async function downloadCardsAsApkg() {
+    if (!compound) return
+    setExporting('apkg')
+    setExportError('')
+    try {
+      await downloadAnkiPackage(compound, exportCards, deckName, setExportProgress)
+      setExportOpen(false)
+      showToast(`Downloaded ${exportCards.length} cards in '${deckName}.apkg'. Import the file into Anki.`)
+    } catch (caughtError) {
+      const message = caughtError instanceof Error ? caughtError.message : 'Could not create the Anki package. Try again.'
+      setExportError(message)
+      showToast(message, 'error')
+    } finally {
+      setExporting(null)
+      setExportProgress('')
+    }
   }
 
   function selectSuggestion(item: { label: string; cid: number | null }) {
@@ -441,23 +520,24 @@ export default function Page() {
               <Card>
                 <CardContent className="p-4">
                   <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Cards ready</p>
-                  <p className="mt-2 text-2xl font-semibold">0</p>
-                  <p className="mt-1 text-xs text-muted-foreground">Configure an export to begin</p>
+                  <p className="mt-2 text-2xl font-semibold">{exportCards.length}</p>
+                  <p className="mt-1 text-xs text-muted-foreground">Based on selected card types</p>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="p-4">
                   <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">AnkiConnect</p>
                   <p className="mt-2 flex items-center gap-2 text-sm font-semibold">
-                    <span className="size-2 rounded-full bg-amber-500" /> Not connected
+                    <span className={`size-2 rounded-full ${ankiStatus === 'connected' ? 'bg-emerald-500' : ankiStatus === 'unavailable' ? 'bg-red-500' : 'bg-amber-500'}`} />
+                    {ankiStatus === 'connected' ? 'Connected' : ankiStatus === 'unavailable' ? 'Unavailable' : 'Not checked'}
                   </p>
-                  <p className="mt-1 text-xs text-muted-foreground">localhost:8765</p>
+                  <p className="mt-1 text-xs text-muted-foreground">{ankiEndpoint}</p>
                 </CardContent>
               </Card>
               <Card>
                 <CardContent className="p-4">
                   <p className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">Target deck</p>
-                  <p className="mt-2 text-sm font-semibold">Organic Chemistry</p>
+                  <p className="mt-2 text-sm font-semibold">{deckName}</p>
                   <p className="mt-1 text-xs text-muted-foreground">Default destination</p>
                 </CardContent>
               </Card>
@@ -465,7 +545,16 @@ export default function Page() {
           </section>
         </div>
 
-        <Dialog open={settingsOpen} onOpenChange={setSettingsOpen}>
+        <Dialog
+          open={settingsOpen}
+          onOpenChange={(open) => {
+            if (open) {
+              setEndpointDraft(ankiEndpoint)
+              setDeckNameDraft(deckName)
+            }
+            setSettingsOpen(open)
+          }}
+        >
           <DialogContent>
             <DialogHeader>
               <DialogTitle>AnkiConnect settings</DialogTitle>
@@ -474,13 +563,26 @@ export default function Page() {
             <div className="flex flex-col gap-4">
               <label className="flex flex-col gap-2 text-sm font-medium">
                 AnkiConnect endpoint
-                <Input defaultValue="http://localhost:8765" />
+                <Input value={endpointDraft} onChange={(event) => setEndpointDraft(event.target.value)} />
               </label>
               <label className="flex flex-col gap-2 text-sm font-medium">
                 Target deck name
-                <Input defaultValue="Organic Chemistry" />
+                <Input value={deckNameDraft} onChange={(event) => setDeckNameDraft(event.target.value)} />
               </label>
-              <Button onClick={() => { setSettingsOpen(false); showToast('Settings saved successfully') }}>Save settings</Button>
+              <Button
+                onClick={() => {
+                  if (!deckNameDraft.trim()) {
+                    showToast('Enter a target deck name before saving settings.', 'error')
+                    return
+                  }
+                  setAnkiEndpoint(endpointDraft.trim())
+                  setDeckName(deckNameDraft.trim())
+                  setSettingsOpen(false)
+                  showToast('Settings saved successfully')
+                }}
+              >
+                Save settings
+              </Button>
             </div>
           </DialogContent>
         </Dialog>
@@ -489,20 +591,20 @@ export default function Page() {
             <DialogHeader>
               <DialogTitle>Configure Anki export</DialogTitle>
               <DialogDescription>
-                Choose the card directions and details to generate for {compound?.title ?? 'this compound'}.
+                Choose the card types and details to generate for {compound?.title ?? 'this compound'}.
               </DialogDescription>
             </DialogHeader>
             <div className="flex flex-col gap-6">
               <fieldset>
-                <legend className="mb-3 text-sm font-semibold">Card directions</legend>
+                <legend className="mb-3 text-sm font-semibold">Card types</legend>
                 <div className="grid gap-2">
-                  {directions.map((direction, index) => (
-                    <label key={direction} className="flex items-start gap-3 rounded-md border p-3 text-sm hover:bg-muted/50">
+                  {CARD_DIRECTIONS.map(({ type, label }) => (
+                    <label key={type} className="flex items-start gap-3 rounded-md border p-3 text-sm hover:bg-muted/50">
                       <Checkbox
-                        checked={selectedDirections.includes(index)}
-                        onCheckedChange={() => setSelectedDirections(selectedDirections.includes(index) ? selectedDirections.filter((item) => item !== index) : [...selectedDirections, index])}
+                        checked={selectedDirections.includes(type)}
+                        onCheckedChange={() => toggleCardType(type)}
                       />
-                      <span>{direction}</span>
+                      <span>{label}</span>
                     </label>
                   ))}
                 </div>
@@ -510,7 +612,7 @@ export default function Page() {
               <fieldset>
                 <legend className="mb-3 text-sm font-semibold">Include in cards</legend>
                 <div className="grid gap-2 sm:grid-cols-2">
-                  {['Formula', 'Molecular weight', 'Physical properties', 'Custom notes'].map((detail) => (
+                  {CARD_DETAILS.map((detail) => (
                     <label key={detail} className="flex items-center gap-3 rounded-md border p-3 text-sm">
                       <Checkbox checked={selectedDetails.includes(detail)} onCheckedChange={() => toggleItem(detail, selectedDetails, setSelectedDetails)} />
                       {detail}
@@ -520,24 +622,44 @@ export default function Page() {
               </fieldset>
               <label className="flex flex-col gap-2 text-sm font-medium">
                 Custom notes
-                <Input placeholder="Optional notes for the back of each card" />
+                <Input
+                  value={customNotes}
+                  onChange={(event) => setCustomNotes(event.target.value)}
+                  placeholder="Optional notes for the back of each card"
+                  disabled={!selectedDetails.includes('Custom notes')}
+                />
               </label>
+              <p className="text-xs text-muted-foreground">
+                {exportCards.length} card{exportCards.length === 1 ? '' : 's'} will be generated in deck “{deckName}”.
+              </p>
+              {exporting && (
+                <div role="status" className="flex items-center gap-2 rounded-md bg-muted/60 p-3 text-sm">
+                  <LoaderCircle className="size-4 animate-spin" />
+                  {exportProgress || 'Preparing export…'}
+                </div>
+              )}
+              {exportError && <p role="alert" className="rounded-md bg-destructive/10 p-3 text-sm text-destructive">{exportError}</p>}
               <div className="flex flex-col gap-2 border-t pt-4 sm:flex-row">
-                <Button className="flex-1" onClick={() => { setExportOpen(false); showToast('Cards pushed to AnkiConnect') }}>
-                  <Upload data-icon="inline-start" /> Direct push to Anki
+                <Button className="flex-1" disabled={exporting !== null || !compound} onClick={() => void pushCardsToAnki()}>
+                  {exporting === 'anki' ? <LoaderCircle className="animate-spin" data-icon="inline-start" /> : <Upload data-icon="inline-start" />}
+                  {exporting === 'anki' ? 'Pushing to Anki…' : 'Direct push to Anki'}
                 </Button>
-                <Button variant="outline" className="flex-1" onClick={() => { setExportOpen(false); showToast('.apkg download prepared') }}>
-                  Download .apkg file
+                <Button variant="outline" className="flex-1" disabled={exporting !== null || !compound} onClick={() => void downloadCardsAsApkg()}>
+                  {exporting === 'apkg' ? <LoaderCircle className="animate-spin" data-icon="inline-start" /> : null}
+                  {exporting === 'apkg' ? 'Building .apkg…' : 'Download .apkg file'}
                 </Button>
               </div>
             </div>
           </DialogContent>
         </Dialog>
         {toast && (
-          <div role="status" className="fixed bottom-5 right-5 z-50 flex items-center gap-3 rounded-lg border bg-card px-4 py-3 text-sm shadow-lg">
-            <span className="size-2 rounded-full bg-emerald-500" />
-            {toast}
-            <button onClick={() => setToast('')} aria-label="Dismiss notification">
+          <div
+            role={toast.tone === 'error' ? 'alert' : 'status'}
+            className="fixed bottom-5 right-5 z-50 flex max-w-[min(90vw,36rem)] items-center gap-3 rounded-lg border bg-card px-4 py-3 text-sm shadow-lg"
+          >
+            <span className={`size-2 shrink-0 rounded-full ${toast.tone === 'error' ? 'bg-red-500' : 'bg-emerald-500'}`} />
+            {toast.message}
+            <button onClick={() => setToast(null)} aria-label="Dismiss notification">
               <X className="size-4 text-muted-foreground" />
             </button>
           </div>

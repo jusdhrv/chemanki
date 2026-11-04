@@ -12,6 +12,7 @@ export type CompoundData = {
   commonNames: string[]
   formula: string
   molecularWeight: string
+  physicalProperties: Array<{ name: string; value: string }>
   smiles: string
   imageUrl: string
   description: string
@@ -39,6 +40,10 @@ type PropertyResponse = {
       MolecularWeight?: string | number
       CanonicalSMILES?: string
       Title?: string
+      XLogP?: string | number
+      ExactMass?: string | number
+      TPSA?: string | number
+      Complexity?: string | number
     }>
   }
 }
@@ -161,6 +166,23 @@ async function getProperties(cids: number[]) {
   return data?.PropertyTable?.Properties ?? []
 }
 
+async function getPhysicalProperties(cid: number): Promise<Array<{ name: string; value: string }>> {
+  const data = await pugJson<PropertyResponse>(
+    `${PUBCHEM_BASE}/compound/cid/${cid}/property/XLogP,ExactMass,TPSA,Complexity/JSON`,
+  )
+  const property = data?.PropertyTable?.Properties?.[0]
+  if (!property) return []
+
+  return [
+    { name: 'XLogP', value: property.XLogP },
+    { name: 'Exact mass (Da)', value: property.ExactMass },
+    { name: 'TPSA (A^2)', value: property.TPSA },
+    { name: 'Complexity', value: property.Complexity },
+  ]
+    .filter((item): item is { name: string; value: string | number } => item.value !== undefined && item.value !== '')
+    .map((item) => ({ name: item.name, value: String(item.value) }))
+}
+
 function pickCommonNames(synonyms: string[], title: string, iupacName: string): string[] {
   const skip = new Set([title.toLowerCase(), iupacName.toLowerCase()])
   const names: string[] = []
@@ -193,10 +215,11 @@ async function getDescription(cid: number): Promise<string> {
 export async function getCompoundByCid(cid: number): Promise<CompoundData | null> {
   if (!Number.isFinite(cid) || cid <= 0) return null
 
-  const [properties, synonyms, description] = await Promise.all([
+  const [properties, synonyms, description, physicalProperties] = await Promise.all([
     getProperties([cid]),
     getSynonyms(cid),
     getDescription(cid),
+    getPhysicalProperties(cid),
   ])
 
   const property = properties[0]
@@ -215,6 +238,7 @@ export async function getCompoundByCid(cid: number): Promise<CompoundData | null
     commonNames: pickCommonNames(synonyms, title, iupacName),
     formula,
     molecularWeight,
+    physicalProperties,
     smiles,
     imageUrl: getCompoundImageUrl(cid),
     description,
