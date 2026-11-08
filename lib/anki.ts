@@ -75,8 +75,8 @@ function detailFields(
     rows.push(
       physicalProperties.length
         ? physicalProperties
-            .map((property) => `<p><strong>${escapeHtml(property.name)}:</strong> ${escapeHtml(property.value)}</p>`)
-            .join('')
+          .map((property) => `<p><strong>${escapeHtml(property.name)}:</strong> ${escapeHtml(property.value)}</p>`)
+          .join('')
         : '<p><strong>Physical properties:</strong> No PubChem properties available</p>',
     )
   }
@@ -306,7 +306,7 @@ export async function downloadAnkiPackage(
     const objectUrl = URL.createObjectURL(blob)
     const anchor = document.createElement('a')
     anchor.href = objectUrl
-    anchor.download = makeDownloadFilename(deckName)
+    anchor.download = makeDownloadFilename(compound.title || compound.iupacName || compound.cid.toString())
     anchor.click()
     window.setTimeout(() => URL.revokeObjectURL(objectUrl), 60_000)
   } finally {

@@ -5,7 +5,7 @@ export const dynamic = 'force-dynamic'
 
 export async function GET(request: NextRequest) {
   const cidParam = request.nextUrl.searchParams.get('cid')
-  const query = request.nextUrl.searchParams.get('q')?.trim() ?? ''
+  const query = (request.nextUrl.searchParams.get('q')?.trim() ?? '').replace(' ', '')
   const full = request.nextUrl.searchParams.get('full') === '1'
 
   if (cidParam) {
